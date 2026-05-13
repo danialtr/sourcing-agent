@@ -47,7 +47,34 @@ Source **exactly 10 candidates** for the job. Call `add_candidate` once per cand
 
    **For non-engineering roles** (PM, design, marketing): use web_search of personal portfolios, Medium, Substack, Dribbble, Behance, conference talks.
 
-   Cap total searches at **2 `github_search_users` + 4 `web_search`** to keep the run fast. Stop as soon as `add_candidate` reports `complete: true`.
+   ### Search budget — STRICT
+
+   - **At most 2 `github_search_users` and 4 `web_search` calls total per run.** The orchestrator enforces this — if you exceed it, you'll receive a `user.message` telling you to stop and the next web_search calls will be wasted.
+   - **If a search returns 0 hits, DO NOT retry with a small variation.** That's a sign the query is over-constrained. Either:
+     - Drop one constraint and try again (only if you haven't hit the budget), OR
+     - Switch to `github_search_users`, OR
+     - Stop and call `add_candidate` with the candidates you already have.
+
+   ### Query construction rules — follow these
+
+   Google ranks **pages**, not paragraphs. The more constraints you AND together, the more likely you get zero hits.
+
+   - **One concept per query.** A skill OR a location OR a site — not all three combined with quotes and OR.
+   - **At most ONE `site:` qualifier per query.** Never combine `site:X OR site:Y` — split into two separate queries.
+   - **At most TWO quoted phrases per query.** Each `"..."` is a hard constraint Google must satisfy exactly.
+   - **Don't combine `OR` with `site:`.** `"X" OR "Y" site:medium.com` returns almost nothing.
+   - **For tiny companies / very specific employee searches, use `github_search_users` instead.** Google has almost no signal on "find me employees of <50-person startup>".
+
+   #### Good vs bad queries (study these)
+
+   | Bad (over-constrained) | Good (focused) |
+   |---|---|
+   | `"chief of staff" OR "founders associate" tech startup Germany Stuttgart blog site:medium.com OR site:substack.com` | `"chief of staff" Stuttgart startup` |
+   | `Sereact robotics Stuttgart team "strategy" OR "operations" employee profile` | `language:typescript location:"Stuttgart"` (github_search_users instead) |
+   | `site:linkedin.com/in "Senior Python" "Berlin" "5 years experience"` | `site:stackoverflow.com/users "python" "Berlin"` |
+   | `"founders associate" "operations" "strategy" "Stuttgart" Germany 2025` | `"founders associate" Stuttgart` |
+
+   Dedupe by GitHub login or by normalized name + company.
 
 4. **Done.** After `add_candidate` returns `complete: true`, output one brief summary message listing the 10 names and stop. The orchestrator handles final sorting and ranking — do not call `write` on candidates.csv.
 

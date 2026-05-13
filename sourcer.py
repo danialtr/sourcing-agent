@@ -37,6 +37,14 @@ PROVENANCE_PATH = ROOT / "provenance.jsonl"
 
 TARGET_COUNT = 10
 
+# Hard caps the orchestrator enforces by sending a steering user.message to
+# the session when the agent crosses each limit. Built-in tools run server-
+# side so we can't refuse calls outright; the steering message tells the
+# agent to stop using that tool for the rest of the run.
+MAX_WEB_SEARCHES = 4
+MAX_WEB_FETCHES = 6
+MAX_GITHUB_SEARCHES = 3
+
 CSV_HEADER = [
     "rank", "match_score", "name", "current_title", "current_company",
     "location", "email", "profile_url", "source", "source_query", "source_url",
@@ -268,7 +276,7 @@ class Provenance:
         tool_use_id: str | None,
         is_error: bool = False,
     ) -> None:
-        summary = _summarize_result(content)
+        summary = _summarize_result(content, tool_name=name)
         self._write(
             event="tool_result", kind=kind, name=name, id=tool_use_id,
             is_error=is_error, summary=summary,
@@ -311,12 +319,39 @@ def _summarize_input(tool_input: Any) -> str:
     return _preview(tool_input, 120)
 
 
-def _summarize_result(content: Any) -> str:
+def _summarize_result(content: Any, tool_name: str | None = None) -> str:
     if isinstance(content, list):
+        if not content:
+            # 0 hits — the most useful interpretation for web_search
+            if tool_name == "web_search":
+                return "0 search hits (query too narrow — try fewer constraints)"
+            if tool_name == "web_fetch":
+                return "fetch failed (no content returned)"
+            return "0 blocks (no results)"
+
+        # Look for any text content to surface
+        text_block = None
+        block_types: list[str] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                return _preview(block.get("text", ""), 120)
-        return f"{len(content)} block(s)"
+            if not isinstance(block, dict):
+                block_types.append("?")
+                continue
+            btype = block.get("type", "?")
+            block_types.append(btype)
+            if btype == "text" and text_block is None:
+                text_block = block.get("text", "")
+
+        if text_block and text_block.strip():
+            return _preview(text_block, 120)
+
+        # No text content — show what kinds of blocks came back
+        unique_types = list(dict.fromkeys(block_types))
+        if tool_name == "web_search":
+            return f"{len(content)} search hit(s)"
+        if tool_name == "web_fetch":
+            return f"fetched ({len(content)} block(s): {', '.join(unique_types)})"
+        return f"{len(content)} block(s): {', '.join(unique_types)}"
+
     if isinstance(content, dict):
         if "users" in content and isinstance(content["users"], list):
             logins = [u.get("login") for u in content["users"][:5] if u.get("login")]
@@ -556,8 +591,66 @@ def main() -> int:
     )
     print(f"Session: {session.id}")
     print(f"Target:  {TARGET_COUNT} candidates -> {OUTPUT_CSV}")
+    print(f"Budgets: max {MAX_WEB_SEARCHES} web_search, {MAX_WEB_FETCHES} web_fetch, {MAX_GITHUB_SEARCHES} github_search_users")
     print(f"Provenance log: {PROVENANCE_PATH}\n")
     prov.status("session_created", detail={"session_id": session.id, "target": TARGET_COUNT})
+
+    # Per-tool usage tracking. The orchestrator can't refuse a built-in tool
+    # call (those run server-side) — instead, when a budget is exceeded we
+    # send a user.message to steer the agent toward stopping.
+    budgets = {
+        "web_search": MAX_WEB_SEARCHES,
+        "web_fetch": MAX_WEB_FETCHES,
+        "github_search_users": MAX_GITHUB_SEARCHES,
+    }
+    counts: dict[str, int] = {name: 0 for name in budgets}
+    warned: set[str] = set()
+    # tool_use_id -> tool_name, so tool_result events can be summarized with
+    # tool-specific formatting (e.g. "0 search hits" vs "0 blocks").
+    tool_name_by_id: dict[str, str] = {}
+
+    def _send_user_message(text: str) -> None:
+        client.beta.sessions.events.send(
+            session.id,
+            events=[{
+                "type": "user.message",
+                "content": [{"type": "text", "text": text}],
+            }],
+        )
+
+    def _check_budget(tool_name: str) -> None:
+        if tool_name not in budgets or tool_name in warned:
+            return
+        if counts[tool_name] < budgets[tool_name]:
+            return
+        warned.add(tool_name)
+        # Pick a tool-specific steering message
+        if tool_name == "web_search":
+            msg = (
+                f"STOP using web_search. You've made {counts[tool_name]} "
+                f"web_search calls — that's the limit. From now on, source "
+                "any remaining candidates ONLY via github_search_users, OR "
+                "call add_candidate with the candidates you have so far and "
+                "STOP. Do not call web_search again."
+            )
+        elif tool_name == "web_fetch":
+            msg = (
+                f"STOP using web_fetch. You've made {counts[tool_name]} "
+                f"web_fetch calls — that's the limit. From the candidates "
+                "you've already seen, pick the strongest, call add_candidate "
+                "for each, and STOP."
+            )
+        elif tool_name == "github_search_users":
+            msg = (
+                f"STOP using github_search_users. You've made {counts[tool_name]} "
+                f"calls — that's the limit. Use the users you've already seen, "
+                "call add_candidate for the strongest, and STOP."
+            )
+        else:
+            return
+        prov.status("budget_warning", detail={"tool": tool_name, "count": counts[tool_name]})
+        print(f"[budget] {tool_name} hit limit ({counts[tool_name]}/{budgets[tool_name]}) — steering agent to stop using it", flush=True)
+        _send_user_message(msg)
 
     # Define the event handler — closure over client / prov / candidates_csv.
     def handle_event(event, seen_event_ids: set[str], responded_tool_use_ids: set[str]) -> bool:
@@ -580,16 +673,22 @@ def main() -> int:
         if et == "agent.tool_use":
             if eid:
                 seen_event_ids.add(eid)
+                tool_name_by_id[eid] = event.name
+            # Bump per-tool counter and warn if over budget.
+            if event.name in counts:
+                counts[event.name] += 1
             prov.tool_use("builtin", event.name, getattr(event, "input", None), eid)
+            _check_budget(event.name)
             return False
 
         if et == "agent.tool_result":
             if eid:
                 seen_event_ids.add(eid)
             content = _content_to_block_list(getattr(event, "content", None))
+            tool_use_id = getattr(event, "tool_use_id", None)
+            tool_name = tool_name_by_id.get(tool_use_id) if tool_use_id else None
             prov.tool_result(
-                "builtin", None, content,
-                getattr(event, "tool_use_id", None),
+                "builtin", tool_name, content, tool_use_id,
                 is_error=getattr(event, "is_error", False) or False,
             )
             return False
@@ -599,13 +698,31 @@ def main() -> int:
             # the network drops between dispatch and send, the retry path
             # will see this event again and re-handle it.
             if eid and eid in responded_tool_use_ids:
-                # Already responded on a previous attempt; safe to mark seen.
                 if eid:
                     seen_event_ids.add(eid)
                 return False
             tool_input = getattr(event, "input", None) or {}
             prov.tool_use("custom", event.name, tool_input, eid)
-            result, is_error = dispatch_custom_tool(event.name, tool_input, candidates_csv)
+
+            # Budget enforcement for custom tools — we control dispatch, so
+            # we can hard-refuse with an error result the agent will see.
+            if event.name in counts:
+                counts[event.name] += 1
+            if (
+                event.name in budgets
+                and counts.get(event.name, 0) > budgets[event.name]
+            ):
+                result = {
+                    "error": (
+                        f"Budget exceeded ({counts[event.name]}/{budgets[event.name]}). "
+                        f"STOP calling {event.name}. Use the data you already have, "
+                        "call add_candidate for the strongest candidates, and STOP."
+                    )
+                }
+                is_error = True
+            else:
+                result, is_error = dispatch_custom_tool(event.name, tool_input, candidates_csv)
+
             prov.tool_result("custom", event.name, result, eid, is_error=is_error)
             client.beta.sessions.events.send(
                 session.id,

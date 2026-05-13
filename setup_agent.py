@@ -30,12 +30,57 @@ SYSTEM_PROMPT = (
     "produce a ranked candidates.csv at /mnt/session/outputs/candidates.csv.\n\n"
     "Follow the talent-sourcer skill for the sourcing process, scoring, and "
     "output format.\n\n"
-    "Use only free public sources: Google (X-ray search on linkedin.com/in, "
-    "github.com, stackoverflow.com), Indeed, Glassdoor, and company careers "
-    "pages. Do not log in to LinkedIn or scrape behind authentication. Never "
-    "fabricate data — leave a field blank if you cannot find it from "
-    "public sources."
+    "Use only free public sources: the GitHub REST API (via the "
+    "`github_search_users` custom tool), Google (X-ray search on "
+    "linkedin.com/in, github.com, stackoverflow.com), Indeed, Glassdoor, and "
+    "company careers pages. Do not log in to LinkedIn or scrape behind "
+    "authentication. Never fabricate data — leave a field blank if you "
+    "cannot find it from public sources.\n\n"
+    "Always populate the `source_query` and `source_url` columns so the user "
+    "can audit where each candidate came from."
 )
+
+# Custom tools executed host-side by sourcer.py. The agent emits
+# agent.custom_tool_use; the orchestrator calls the underlying API and sends
+# back a user.custom_tool_result. The credentials never enter the container.
+CUSTOM_TOOLS = [
+    {
+        "type": "custom",
+        "name": "github_search_users",
+        "description": (
+            "Search GitHub users by location, language, name, bio, follower "
+            "count, or other criteria via the GitHub REST API. Returns up to "
+            "30 users, each with login, name, bio, location, company, public "
+            "email (if listed), blog URL, follower count, and public repo "
+            "count. Prefer this over `site:github.com` web searches when "
+            "sourcing engineers — the data is typed and far richer. "
+            "Query syntax follows https://docs.github.com/en/search-github/"
+            "searching-on-github/searching-users — examples: "
+            "'language:python location:\"San Francisco\" followers:>50', "
+            "'fullname:\"Jane Doe\"', 'language:rust followers:>100'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "GitHub user search query. Use GitHub's search "
+                        "syntax (language:, location:, followers:, etc.)."
+                    ),
+                },
+                "per_page": {
+                    "type": "integer",
+                    "description": "Max results to return (1-30, default 20).",
+                    "default": 20,
+                    "minimum": 1,
+                    "maximum": 30,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+]
 
 
 def _ensure_env_file() -> None:
@@ -102,7 +147,7 @@ def _get_or_create_agent(client: anthropic.Anthropic, skill_id: str) -> str:
         name="Talent Sourcer",
         model=MODEL,
         system=SYSTEM_PROMPT,
-        tools=[{"type": "agent_toolset_20260401"}],
+        tools=[{"type": "agent_toolset_20260401"}, *CUSTOM_TOOLS],
         skills=[{"type": "custom", "skill_id": skill_id}],
     )
     set_key(str(ENV_PATH), "AGENT_ID", agent.id)

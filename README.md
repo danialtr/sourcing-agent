@@ -1,6 +1,6 @@
 # Talent Sourcing Agent
 
-Single autonomous Claude Managed Agent that sources up to 50 candidates for a
+Single autonomous Claude Managed Agent that sources **10 candidates** for a
 job from **free public sources only**:
 
 - **GitHub REST API** (best signal for engineering roles, via host-side custom tool)
@@ -12,8 +12,13 @@ search budget on sources that work.
 
 No Apollo, no Clay, no paid databases.
 
-Writes `candidates.csv` with **full provenance** — every row records the exact
-query and URL the agent used to find that candidate.
+Writes `candidates.csv` **incrementally** — one row per candidate, flushed to
+disk before the agent continues. If the run crashes mid-stream (network drop,
+SSE disconnect, anything), you keep all candidates added so far.
+
+Streams `candidates.csv` with **full provenance** — every row records the exact
+query and URL the agent used to find that candidate. Reconnects automatically
+on transient network errors and replays missed events via `events.list()`.
 
 ## Parts
 
@@ -41,16 +46,17 @@ Option 2 is simpler (PAT in `.env`, no OAuth, no vault), free, and gives a nice
 side-effect: every GitHub call goes through our orchestrator so we can log it
 in the provenance audit trail.
 
-## The 5 steps the agent runs autonomously
+## The steps the agent runs autonomously
 
-1. **Fetch the JD** — `web_fetch` the URL (skipped if it's a LinkedIn URL); fall back to `web_search` for a public mirror (Indeed, Glassdoor, careers page). Bails after 2 failed fetches plus 1 fallback search.
+1. **Fetch the JD** — `web_fetch` the URL (skipped if it's a LinkedIn URL); fall back to `web_search` for a public mirror. Bails after 2 failed fetches plus 1 fallback search.
 2. **Parse the role** — title, seniority, must-have skills, location, remote policy, deal-breakers.
-3. **Source candidates** — mix of:
-   - `github_search_users` (custom tool, free GitHub REST API) — 2–3 queries for engineering roles
-   - `web_search` across `stackoverflow.com/users`, `news.ycombinator.com`, `dev.to`, personal portfolios, conference speaker pages — up to 6 queries
+3. **Source candidates one at a time.** For each candidate the agent finds and scores, it calls `add_candidate(...)` — a host-side custom tool that appends one CSV row, flushes to disk, dedupes on name + profile_url, and tells the agent how many more it needs. The agent stops as soon as the tool reports `complete: true`.
+4. **Done.** The orchestrator re-sorts the CSV by `match_score` descending and renumbers `rank` once the agent finishes.
+
+Searches used:
+   - `github_search_users` (custom tool, free GitHub REST API) — 1–2 queries for engineering roles
+   - `web_search` across `stackoverflow.com/users`, `news.ycombinator.com`, `dev.to`, personal portfolios, conference speaker pages — up to 4 queries
    - `web_fetch` to pull richer info from promising profiles
-4. **Score 0–100** — must-have coverage weighted highest; deal-breakers lower the score and get flagged in `reason` rather than dropping the candidate.
-5. **Write the CSV** to `/mnt/session/outputs/candidates.csv` with provenance columns.
 
 ## CSV columns
 
@@ -128,8 +134,18 @@ copy-pasting from a browser into Notepad just works.
 | Indeed, Glassdoor, careers pages | Hit-or-miss | Mostly works — headless Chromium, rotating IPs, JS execution |
 | GitHub, Stack Overflow, HackerNews, dev.to, personal sites | Works | Works — use httpx for free (this is what `github_search_users` does) |
 
+## Crash resilience
+
+- **Incremental CSV writes** — `add_candidate` flushes each row before returning. If `sourcer.py` is killed, the network drops, or the session crashes, every candidate added before the crash is still in `candidates.csv`. Re-run to start fresh, or open the partial CSV.
+- **Auto-reconnect** — the SSE event stream from Anthropic can drop on long sessions (`httpx.RemoteProtocolError: peer closed connection`). `sourcer.py` catches this, opens a new stream, replays any events missed during the gap via `events.list()`, dedupes by event ID, and continues. Up to 3 retries with exponential backoff.
+- **Dedup** — duplicate candidates (same name + profile_url) are silently rejected at the orchestrator. The agent gets `duplicate: true` in the response and moves on.
+
+## Changing the target count
+
+Edit `TARGET_COUNT = 10` at the top of `sourcer.py`. The agent learns the target from the kickoff message and the `add_candidate` response; no agent change needed.
+
 ## Iterating
 
 - **Tweak the playbook:** edit `skill/SKILL.md` → re-run `python setup_agent.py` → agent uses the new skill version on the next session, no agent recreation needed.
-- **Add another custom tool** (e.g. Stack Exchange API, Hacker News, Dribbble): add the tool definition to `CUSTOM_TOOLS` in `setup_agent.py`, add a handler in `dispatch_custom_tool()` in `sourcer.py`, recreate the agent.
+- **Add a new custom tool:** add the tool definition to `CUSTOM_TOOLS` in `setup_agent.py`, add a handler in `dispatch_custom_tool()` in `sourcer.py`, **delete `AGENT_ID` from `.env`**, re-run `setup_agent.py`. The new agent will have the new tool.
 - **Change model / system prompt / built-in tools:** edit `setup_agent.py`, delete `AGENT_ID` from `.env`, re-run `setup_agent.py` — gives you a fresh agent with the new config.

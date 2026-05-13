@@ -26,19 +26,22 @@ MODEL = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = (
     "You are a talent sourcing agent. When given a job posting URL or a job "
-    "description, source candidates from public web sources and produce a "
-    "ranked candidates.csv at /mnt/session/outputs/candidates.csv.\n\n"
-    "Follow the talent-sourcer skill for the sourcing process, scoring, and "
-    "output format.\n\n"
+    "description, source candidates from public web sources and write each "
+    "one immediately to candidates.csv using the `add_candidate` tool.\n\n"
+    "Follow the talent-sourcer skill for the sourcing process and scoring.\n\n"
+    "CRITICAL: After confirming a candidate fits the role, call `add_candidate` "
+    "EXACTLY ONCE for that candidate before moving on. Do NOT batch — each "
+    "call durably persists the candidate to disk so partial progress survives "
+    "interruptions. Stop after the tool tells you the target count is reached. "
+    "Do NOT write candidates.csv with the `write` tool — the orchestrator "
+    "handles that.\n\n"
     "Use free public sources only: the GitHub REST API (via the "
     "`github_search_users` custom tool) and Google web search of "
     "stackoverflow.com, news.ycombinator.com, dev.to, company careers pages, "
     "and personal portfolios. **Do NOT query LinkedIn** — its pages are "
-    "blocked from automated fetch and yield no useful candidate data; spend "
-    "the search budget elsewhere. Never fabricate data — leave a field blank "
-    "if you cannot find it from public sources.\n\n"
-    "Always populate the `source_query` and `source_url` columns so the user "
-    "can audit where each candidate came from."
+    "blocked from automated fetch and yield no useful candidate data. Never "
+    "fabricate data — leave a field blank if you cannot find it from "
+    "public sources."
 )
 
 # Custom tools executed host-side by sourcer.py. The agent emits
@@ -79,6 +82,88 @@ CUSTOM_TOOLS = [
                 },
             },
             "required": ["query"],
+        },
+    },
+    {
+        "type": "custom",
+        "name": "add_candidate",
+        "description": (
+            "Append ONE ranked candidate to candidates.csv. Call this exactly "
+            "once per candidate as soon as you confirm they fit the role — do "
+            "NOT batch. Each call is durably written to disk before returning, "
+            "so partial progress survives any crash. The response tells you "
+            "the running count and remaining slots; stop calling this tool "
+            "once `complete: true` is returned. Duplicates (same name + "
+            "profile_url) are silently skipped."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Candidate's full name."},
+                "match_score": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "0-100 fit score against the must-haves.",
+                },
+                "current_title": {
+                    "type": "string",
+                    "description": "Current job title, or empty string if unknown.",
+                },
+                "current_company": {
+                    "type": "string",
+                    "description": "Current employer, or empty string if unknown.",
+                },
+                "location": {
+                    "type": "string",
+                    "description": "City/country, or empty string if unknown.",
+                },
+                "email": {
+                    "type": "string",
+                    "description": (
+                        "Public email (GitHub's email field, posted resume). "
+                        "Empty string if not publicly listed — NEVER guess."
+                    ),
+                },
+                "profile_url": {
+                    "type": "string",
+                    "description": (
+                        "Primary public profile URL (GitHub, Stack Overflow, "
+                        "personal site, etc.). Empty if not available."
+                    ),
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["github", "stackoverflow", "hackernews", "devto", "web"],
+                    "description": "Which kind of source surfaced this candidate.",
+                },
+                "source_query": {
+                    "type": "string",
+                    "description": (
+                        "The exact search query or tool input that found this "
+                        "candidate (e.g. 'language:python location:\"SF\" "
+                        "followers:>50')."
+                    ),
+                },
+                "source_url": {
+                    "type": "string",
+                    "description": (
+                        "URL of the page where you extracted this candidate's "
+                        "info (their GitHub profile, SO user page, etc.)."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "One sentence explaining the score. Mention any "
+                        "deal-breakers (e.g. 'Strong skill match but located "
+                        "in São Paulo, may not relocate')."
+                    ),
+                },
+            },
+            "required": [
+                "name", "match_score", "source", "source_query", "source_url", "reason",
+            ],
         },
     },
 ]

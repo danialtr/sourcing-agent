@@ -1,72 +1,71 @@
 ---
 name: talent-sourcer
-description: Source candidates for a job posting from public web sources via the GitHub REST API and Google web search (Stack Overflow, HackerNews, personal sites, conference talks). Outputs a ranked candidates.csv with full provenance. Use when given a job description text or a public job posting URL. Does not query LinkedIn.
+description: Source 10 candidates for a job posting from public web sources via the GitHub REST API and Google web search (Stack Overflow, HackerNews, personal sites). Streams each candidate into candidates.csv as it's confirmed via the add_candidate tool, so partial progress survives any interruption. Use when given a job description text or a public job posting URL. Does not query LinkedIn.
 ---
 
 # Talent Sourcer
 
-Source up to 50 candidates for a job using public sources only.
+Source **exactly 10 candidates** for the job. Call `add_candidate` once per candidate as you confirm them — partial progress is durably written to disk after each call.
 
-**Never query LinkedIn.** LinkedIn profile pages are blocked from automated fetch (`url_not_allowed`) and its search snippets don't yield useful candidate data. Spend your search budget on sources that actually work.
+**Never query LinkedIn.** Its pages are blocked from automated fetch and don't yield useful data.
 
 ## Available tools
 
-- `github_search_users` (custom) — direct GitHub REST API. **First-line tool for engineering roles.** Returns typed profile data: login, name, bio, location, company, public email (if listed), blog URL, follower count, repo count.
-- `web_search` — Google. Use for Stack Overflow, HackerNews, dev.to, Medium, Dribbble, conference speakers, personal portfolios.
-- `web_fetch` — pull full page contents from non-LinkedIn URLs (company careers pages, personal sites, GitHub repos, conference pages).
-- `write`, `read`, `bash`, `edit`, `glob`, `grep` — container filesystem.
+- `github_search_users` (custom) — direct GitHub REST API. First-line tool for engineering roles.
+- `add_candidate` (custom) — **append one ranked candidate to candidates.csv.** Call this EXACTLY ONCE per candidate as soon as you confirm they fit. Do NOT batch. Each call is persisted before returning, so the run is crash-safe. Watch the `count` / `remaining` / `complete` fields in the response — when `complete: true`, STOP.
+- `web_search` — Google. Use for `site:stackoverflow.com/users`, `site:news.ycombinator.com`, `site:dev.to`, conference speakers, personal portfolios.
+- `web_fetch` — pull full page contents from non-LinkedIn URLs.
+- `write`, `read`, `bash`, `edit`, `glob`, `grep` — container filesystem. **Do NOT use `write` for candidates.csv** — that's the orchestrator's job via `add_candidate`.
 
 ## Steps
 
 1. **Get the job description.**
-   - If the input URL is on `linkedin.com`, **do NOT call web_fetch on it.** Go straight to a `web_search` for the company name + job title + location to find a public mirror (Indeed, Glassdoor, the company's careers page).
+   - If the input URL is on `linkedin.com`, do NOT call `web_fetch` — go straight to `web_search` for a public mirror (Indeed, Glassdoor, careers page).
    - For non-LinkedIn URLs, try `web_fetch` at most 2 times.
-   - **If after 2 `web_fetch` attempts plus 1 fallback `web_search` you don't have the JD text, STOP IMMEDIATELY.** Output one final message:
+   - **If after 2 web_fetch attempts plus 1 fallback web_search you don't have the JD text, STOP IMMEDIATELY.** Output one final message:
      > "Could not retrieve the job description from the URL. Please re-run with: `python sourcer.py --file role.txt` after pasting the JD text into `role.txt`."
 
-     Do NOT call any more tools. Do NOT write an empty CSV. Do NOT invent a JD.
+     Do NOT call any more tools. Do NOT call `add_candidate`. Do NOT invent a JD.
 
 2. **Parse the role.** Extract: title, seniority, 3–5 must-have skills, location, remote policy, deal-breakers.
 
-3. **Source candidates.** Aim for 50 unique candidates. Stop earlier once you have them.
+3. **Source candidates one at a time.**
+   - For each search query (GitHub or web), examine each result.
+   - For each strong candidate, score them 0–100 against the must-haves and call `add_candidate` immediately with all the fields you know. Use empty strings for fields you can't verify — **never guess emails, titles, or companies**.
+   - After each `add_candidate` call, check the response's `complete` field. When it's `true`, STOP — do not call `add_candidate` again, do not run more searches.
+   - If a candidate is a duplicate, `add_candidate` returns `{"duplicate": true}` and the candidate is silently skipped — just continue to the next candidate.
 
-   **For engineering roles**, lead with the GitHub API:
-   - `github_search_users` with 2–3 queries varying skills and location:
-     - `language:python location:"San Francisco" followers:>50`
-     - `language:rust location:"San Francisco"`
-     - `language:typescript location:"Berlin" repos:>10`
+   **For engineering roles**, lead with the GitHub API. Run 1–2 `github_search_users` queries varying skills and location:
+   - `language:python location:"San Francisco" followers:>50`
+   - `language:rust location:"San Francisco"`
 
-   Then supplement with web_search across non-LinkedIn channels:
-   - `site:stackoverflow.com/users "<skill>"` — high-rep Q&A users
-   - `site:news.ycombinator.com "<skill>" "<location>"` — HN bios in profile pages
-   - `site:dev.to "<skill>"` — devs who write
-   - `"<skill>" "<location>" "resume" OR "portfolio"` — personal sites
-   - `"speaker" "<skill> conference"` — senior speakers (for senior roles)
+   Then if you need more candidates, supplement with web_search:
+   - `site:stackoverflow.com/users "<skill>"`
+   - `site:news.ycombinator.com "<skill>" "<location>"`
+   - `site:dev.to "<skill>"`
+   - `"<skill>" "<location>" "resume" OR "portfolio"`
 
-   **For non-engineering roles** (PM, design, marketing, sales): use web_search of personal portfolios, Medium, Substack, Dribbble (designers), Behance, Notion bio pages, conference talk lists.
+   **For non-engineering roles** (PM, design, marketing): use web_search of personal portfolios, Medium, Substack, Dribbble, Behance, conference talks.
 
-   Cap total searches at **3 `github_search_users` + 6 `web_search`**. Dedupe by GitHub login or by normalized name + company.
+   Cap total searches at **2 `github_search_users` + 4 `web_search`** to keep the run fast. Stop as soon as `add_candidate` reports `complete: true`.
 
-4. **Score each candidate 0–100.** Weight must-have skill coverage highest; nice-to-have skills add bonus; flag deal-breakers in the `reason` field and apply a score penalty (do not drop the candidate).
+4. **Done.** After `add_candidate` returns `complete: true`, output one brief summary message listing the 10 names and stop. The orchestrator handles final sorting and ranking — do not call `write` on candidates.csv.
 
-5. **Write `/mnt/session/outputs/candidates.csv`** with these columns in this exact order:
+## Field guidance for `add_candidate`
 
-   ```
-   rank,match_score,name,current_title,current_company,location,email,profile_url,source,source_query,source_url,reason
-   ```
-
-   Column rules:
-   - `rank` — 1..N, sorted by `match_score` descending
-   - `email` — only fill from a verified public source (GitHub public email field, candidate's own posted resume). Never guess.
-   - `profile_url` — the candidate's primary public profile URL (GitHub, Stack Overflow, personal site, Dribbble, etc.). Whichever is most informative.
-   - `source` — one of: `github`, `stackoverflow`, `hackernews`, `devto`, `web`
-   - `source_query` — the exact search query or tool input that surfaced this candidate
-   - `source_url` — the URL of the page the agent extracted this candidate's info from
-   - Use standard CSV quoting (`"..."`) for any field containing a comma, quote, or newline
+- `name` — full name (required)
+- `match_score` — 0–100 against must-haves (required)
+- `current_title`, `current_company`, `location` — empty string if not publicly stated
+- `email` — empty string unless publicly listed on GitHub or candidate's own resume; **never guess**
+- `profile_url` — GitHub, Stack Overflow, personal site, etc. — whichever is the candidate's primary public presence
+- `source` — `github`, `stackoverflow`, `hackernews`, `devto`, or `web`
+- `source_query` — the EXACT search query or tool input that surfaced this candidate
+- `source_url` — the URL of the page where you extracted the data
+- `reason` — one sentence on why they match; flag any deal-breakers here
 
 ## Rules
 
 - **Public sources only. No LinkedIn. No paid databases. No fabricated data.**
-- Leave fields blank when uncertain. Never guess emails, titles, or companies.
-- Aim for 50 rows; write fewer if that's all the searches found. Do not pad with duplicates or low-confidence guesses.
-- Always fill `source_query` and `source_url` — they are the user's audit trail.
+- Add candidates ONE AT A TIME via `add_candidate` — do NOT batch.
+- Stop as soon as the tool reports `complete: true`.
+- Leave fields blank when uncertain. Never guess.

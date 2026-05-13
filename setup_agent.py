@@ -35,12 +35,18 @@ SYSTEM_PROMPT = (
     "interruptions. Stop after the tool tells you the target count is reached. "
     "Do NOT write candidates.csv with the `write` tool — the orchestrator "
     "handles that.\n\n"
-    "Use free public sources only: the GitHub REST API (via the "
-    "`github_search_users` custom tool) and Google web search of "
-    "stackoverflow.com, news.ycombinator.com, dev.to, company careers pages, "
-    "and personal portfolios. **Do NOT query LinkedIn** — its pages are "
-    "blocked from automated fetch and yield no useful candidate data. Never "
-    "fabricate data — leave a field blank if you cannot find it from "
+    "Sourcing tools you have, in rough priority order:\n"
+    "  - `fetch_company_team_page` — best for non-engineering roles at "
+    "specific companies (5-20 candidates from one team page)\n"
+    "  - `github_search_users` — best first move for engineering roles\n"
+    "  - `github_user_network` — snowball from one good GitHub user to peers\n"
+    "  - `web_search` — fallback for non-engineering when you don't have a "
+    "company yet; START BROAD (2-4 words, no site: filters), narrow only "
+    "if you get too many results. If a query returns 0 hits, BROADEN — "
+    "never add more constraints.\n"
+    "  - `web_fetch` — pull a specific page once you have a URL\n\n"
+    "**Do NOT query LinkedIn** — its pages are blocked from automated fetch. "
+    "Never fabricate data — leave a field blank if you cannot find it from "
     "public sources."
 )
 
@@ -82,6 +88,81 @@ CUSTOM_TOOLS = [
                 },
             },
             "required": ["query"],
+        },
+    },
+    {
+        "type": "custom",
+        "name": "github_user_network",
+        "description": (
+            "Get a GitHub user's 1-hop social graph: who they follow and who "
+            "follows them, with full profile data on each connected user. "
+            "Powerful 'snowball sampling' tool — once `github_search_users` "
+            "finds one strong engineering candidate, calling this with their "
+            "login often surfaces 10–20 peers in the same scene who would "
+            "otherwise take many wasted web_search calls to find. Returns "
+            "each user's login, name, bio, location, company, public email "
+            "(if listed), blog, follower count, repo count, and whether they "
+            "follow the seed or are followed by the seed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "username": {
+                    "type": "string",
+                    "description": "GitHub login (e.g. 'jane123'), without @ or URL.",
+                },
+                "include_following": {
+                    "type": "boolean",
+                    "description": "Include users the seed follows.",
+                    "default": True,
+                },
+                "include_followers": {
+                    "type": "boolean",
+                    "description": "Include users who follow the seed.",
+                    "default": True,
+                },
+                "max_users": {
+                    "type": "integer",
+                    "description": "Cap total users returned (1-100, default 20).",
+                    "default": 20,
+                    "minimum": 1,
+                    "maximum": 100,
+                },
+            },
+            "required": ["username"],
+        },
+    },
+    {
+        "type": "custom",
+        "name": "fetch_company_team_page",
+        "description": (
+            "Try common team-page URL patterns at a company's homepage and "
+            "return the first hit as plain text. Patterns tried: /team, "
+            "/about, /about-us, /people, /company/team, /our-team, "
+            "/careers/team, etc. **Highest-leverage tool for sourcing "
+            "non-engineering candidates** at specific companies — a single "
+            "team page often lists 5–20 employees with names and titles, "
+            "saving many wasted web_search calls. Host-side (free, does not "
+            "use the web_fetch budget). Requires the company's homepage URL; "
+            "if you don't know it, run a web_search first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "company_name": {
+                    "type": "string",
+                    "description": "Company display name, for logging/output.",
+                },
+                "homepage_url": {
+                    "type": "string",
+                    "description": (
+                        "Full URL of the company's homepage (e.g. "
+                        "'https://sereact.ai'). Required — if you don't know "
+                        "it, run a web_search like '<company> official site' first."
+                    ),
+                },
+            },
+            "required": ["company_name", "homepage_url"],
         },
     },
     {

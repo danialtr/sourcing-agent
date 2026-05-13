@@ -21,6 +21,7 @@ import csv
 import json
 import os
 import pathlib
+import re as _re
 import sys
 import time
 import traceback as _tb
@@ -44,6 +45,8 @@ TARGET_COUNT = 10
 MAX_WEB_SEARCHES = 4
 MAX_WEB_FETCHES = 6
 MAX_GITHUB_SEARCHES = 3
+MAX_GITHUB_NETWORK = 2       # snowball calls hit many API requests; cap tight
+MAX_TEAM_PAGE_FETCHES = 5    # host-side, free, but bound it anyway
 
 CSV_HEADER = [
     "rank", "match_score", "name", "current_title", "current_company",
@@ -228,6 +231,172 @@ def github_search_users(query: str, per_page: int = 20) -> dict[str, Any]:
         return {"error": f"HTTP error: {exc}"}
 
 
+def github_user_network(
+    username: str,
+    include_following: bool = True,
+    include_followers: bool = True,
+    max_users: int = 20,
+) -> dict[str, Any]:
+    """Fetch a GitHub user's follow graph (1-hop) with full profile data on each
+    connected user. Snowball-sampling pattern for finding peers."""
+    pat = os.getenv("GITHUB_PAT")
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "talent-sourcer"}
+    if pat:
+        headers["Authorization"] = f"Bearer {pat}"
+    max_users = max(1, min(int(max_users or 20), 100))
+
+    username = (username or "").strip().lstrip("@")
+    if not username:
+        return {"error": "username is required"}
+
+    try:
+        with httpx.Client(timeout=30.0, headers=headers) as client:
+            seed = client.get(f"https://api.github.com/users/{username}")
+            if seed.status_code == 404:
+                return {"error": f"GitHub user '{username}' not found"}
+            if seed.status_code == 401:
+                return {"error": "GitHub auth failed — check GITHUB_PAT"}
+            if seed.status_code == 403:
+                return {"error": f"GitHub rate-limited: {seed.text[:200]}"}
+            if seed.status_code >= 400:
+                return {"error": f"GitHub error {seed.status_code}"}
+
+            # Collect logins with their relationship to the seed
+            connections: dict[str, str] = {}
+            for include, relation, path in (
+                (include_following, "follows", "following"),
+                (include_followers, "follower", "followers"),
+            ):
+                if not include:
+                    continue
+                r = client.get(
+                    f"https://api.github.com/users/{username}/{path}",
+                    params={"per_page": min(max_users, 100)},
+                )
+                if r.status_code >= 400:
+                    continue
+                for u in r.json():
+                    login = u.get("login")
+                    if login and login not in connections:
+                        connections[login] = relation
+
+            # Cap and fetch full profile per connection
+            users: list[dict[str, Any]] = []
+            for login in list(connections.keys())[:max_users]:
+                try:
+                    p = client.get(f"https://api.github.com/users/{login}")
+                    if p.status_code >= 400:
+                        users.append({"login": login, "relationship": connections[login]})
+                        continue
+                    pj = p.json()
+                    users.append({
+                        "login": pj.get("login"),
+                        "name": pj.get("name"),
+                        "bio": pj.get("bio"),
+                        "location": pj.get("location"),
+                        "company": pj.get("company"),
+                        "blog": pj.get("blog"),
+                        "email": pj.get("email"),
+                        "html_url": pj.get("html_url"),
+                        "followers": pj.get("followers"),
+                        "public_repos": pj.get("public_repos"),
+                        "relationship": connections[login],
+                    })
+                except Exception as exc:
+                    users.append({"login": login, "fetch_error": str(exc), "relationship": connections[login]})
+
+            return {
+                "seed_user": username,
+                "total_connections_seen": len(connections),
+                "returned": len(users),
+                "users": users,
+            }
+    except httpx.HTTPError as exc:
+        return {"error": f"HTTP error: {exc}"}
+
+
+_TEAM_PAGE_PATHS = [
+    "/team",
+    "/about/team",
+    "/about-us",
+    "/about",
+    "/people",
+    "/company/team",
+    "/company",
+    "/our-team",
+    "/our-people",
+    "/about/our-team",
+    "/careers/team",
+    "/who-we-are",
+]
+
+
+def fetch_company_team_page(company_name: str, homepage_url: str = "") -> dict[str, Any]:
+    """Try common team-page URL patterns starting from a company's homepage and
+    return the first hit. Host-side, free — does not use the agent's web_fetch
+    budget. Strips HTML to plain text the agent can parse for names + roles."""
+    if not homepage_url.strip():
+        return {
+            "error": (
+                f"No homepage URL provided for {company_name!r}. "
+                f"Run a web_search like '{company_name} official site' first, "
+                "then call this tool again with the resulting homepage URL."
+            )
+        }
+
+    url = homepage_url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    url = url.rstrip("/")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (compatible; talent-sourcer/1.0; "
+            "+https://github.com/danialtr/sourcing-agent)"
+        ),
+        "Accept": "text/html,application/xhtml+xml",
+    }
+
+    tried: list[str] = []
+    try:
+        with httpx.Client(timeout=15.0, headers=headers, follow_redirects=True) as client:
+            for path in _TEAM_PAGE_PATHS:
+                full = url + path
+                tried.append(full)
+                try:
+                    r = client.get(full)
+                except httpx.HTTPError:
+                    continue
+                if r.status_code != 200:
+                    continue
+                # Strip HTML to plaintext crudely (good enough to spot names)
+                text = _re.sub(r"<script[^>]*>.*?</script>", " ", r.text, flags=_re.DOTALL | _re.IGNORECASE)
+                text = _re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=_re.DOTALL | _re.IGNORECASE)
+                text = _re.sub(r"<[^>]+>", " ", text)
+                text = _re.sub(r"\s+", " ", text).strip()
+                if len(text) < 500:
+                    continue  # likely a thin / JS-only page; try the next pattern
+                return {
+                    "company": company_name,
+                    "url": str(r.url),
+                    "raw_bytes": len(r.content),
+                    "text_chars": len(text),
+                    # Cap at 12K chars so the response isn't huge
+                    "text": text[:12000] + ("..." if len(text) > 12000 else ""),
+                }
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"unexpected error: {exc!r}", "tried_urls": tried}
+
+    return {
+        "error": (
+            f"No team page found at common paths for {company_name}. "
+            "Try web_fetch with the actual /team URL if you can find it, "
+            "or the homepage to see what links exist."
+        ),
+        "tried_urls": tried,
+    }
+
+
 def dispatch_custom_tool(
     name: str,
     tool_input: dict[str, Any],
@@ -238,6 +407,20 @@ def dispatch_custom_tool(
         result = github_search_users(
             query=tool_input.get("query", ""),
             per_page=tool_input.get("per_page", 20),
+        )
+        return result, "error" in result
+    if name == "github_user_network":
+        result = github_user_network(
+            username=tool_input.get("username", ""),
+            include_following=tool_input.get("include_following", True),
+            include_followers=tool_input.get("include_followers", True),
+            max_users=tool_input.get("max_users", 20),
+        )
+        return result, "error" in result
+    if name == "fetch_company_team_page":
+        result = fetch_company_team_page(
+            company_name=tool_input.get("company_name", ""),
+            homepage_url=tool_input.get("homepage_url", ""),
         )
         return result, "error" in result
     if name == "add_candidate":
@@ -356,7 +539,12 @@ def _summarize_result(content: Any, tool_name: str | None = None) -> str:
         if "users" in content and isinstance(content["users"], list):
             logins = [u.get("login") for u in content["users"][:5] if u.get("login")]
             tail = "..." if len(content["users"]) > 5 else ""
-            return f"{content.get('returned', len(content['users']))} users ({', '.join(logins)}{tail})"
+            label = "users"
+            if content.get("seed_user"):
+                label = f"network of @{content['seed_user']}"
+            return f"{content.get('returned', len(content['users']))} {label} ({', '.join(logins)}{tail})"
+        if content.get("text_chars") is not None and content.get("url"):
+            return f"team page {content['url']} ({content['text_chars']:,} chars)"
         if content.get("added"):
             return f"added rank={content.get('rank')} count={content.get('count')}/{TARGET_COUNT}"
         if content.get("duplicate"):
@@ -591,7 +779,12 @@ def main() -> int:
     )
     print(f"Session: {session.id}")
     print(f"Target:  {TARGET_COUNT} candidates -> {OUTPUT_CSV}")
-    print(f"Budgets: max {MAX_WEB_SEARCHES} web_search, {MAX_WEB_FETCHES} web_fetch, {MAX_GITHUB_SEARCHES} github_search_users")
+    print(
+        f"Budgets: web_search={MAX_WEB_SEARCHES} web_fetch={MAX_WEB_FETCHES} "
+        f"github_search_users={MAX_GITHUB_SEARCHES} "
+        f"github_user_network={MAX_GITHUB_NETWORK} "
+        f"fetch_company_team_page={MAX_TEAM_PAGE_FETCHES}"
+    )
     print(f"Provenance log: {PROVENANCE_PATH}\n")
     prov.status("session_created", detail={"session_id": session.id, "target": TARGET_COUNT})
 
@@ -602,6 +795,8 @@ def main() -> int:
         "web_search": MAX_WEB_SEARCHES,
         "web_fetch": MAX_WEB_FETCHES,
         "github_search_users": MAX_GITHUB_SEARCHES,
+        "github_user_network": MAX_GITHUB_NETWORK,
+        "fetch_company_team_page": MAX_TEAM_PAGE_FETCHES,
     }
     counts: dict[str, int] = {name: 0 for name in budgets}
     warned: set[str] = set()

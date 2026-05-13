@@ -16,9 +16,12 @@ Source up to 50 candidates for a job using only public sources. Output a CSV wit
 ## Steps
 
 1. **Get the job description.**
-   - Try `web_fetch` on the input URL.
-   - If it's a LinkedIn search page that returns nothing useful, `web_search` for the company + role + location, then `web_fetch` the public listing on Indeed, Glassdoor, or the company careers page.
-   - If still nothing, report the failure and stop — do not invent a JD.
+   - Try `web_fetch` on the input URL **at most 2 times**.
+   - If the URL is for `linkedin.com` and `web_fetch` returns `url_not_allowed`, do NOT retry the same URL. Try **one** `web_search` to find a public mirror of the job posting (Indeed, Glassdoor, the company's careers page), then `web_fetch` that result.
+   - **If after 2 `web_fetch` attempts plus 1 `web_search` you still don't have the JD text, STOP IMMEDIATELY.** Output one final message:
+     > "Could not retrieve the job description from the URL (LinkedIn job-search URLs are commonly blocked). Please re-run with: `python sourcer.py --file role.txt` after pasting the JD text into `role.txt`."
+
+     Do NOT call any more tools. Do NOT write an empty CSV. Do NOT invent a JD.
 
 2. **Parse the role.** Extract: title, seniority, 3–5 must-have skills, location, remote policy, deal-breakers.
 

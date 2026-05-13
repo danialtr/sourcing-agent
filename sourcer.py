@@ -18,6 +18,7 @@ import os
 import pathlib
 import sys
 import time
+import traceback as _tb
 from typing import Any
 
 import anthropic
@@ -248,7 +249,12 @@ def _kickoff_message(args: argparse.Namespace) -> str:
         "/mnt/session/outputs/candidates.csv per the talent-sourcer skill. "
         "Always populate source_query and source_url so I can see where each "
         "candidate was found.\n\n"
-        f"URL: {args.url}"
+        f"URL: {args.url}\n\n"
+        "IMPORTANT: LinkedIn job URLs frequently return `url_not_allowed` from "
+        "web_fetch. Per the skill, attempt at most 2 web_fetch calls plus 1 "
+        "fallback web_search. If you still can't get the JD after that, STOP "
+        "and ask the user to re-run with `--file role.txt` — do NOT keep "
+        "retrying and do NOT write an empty CSV."
     )
 
 
@@ -335,86 +341,102 @@ def main() -> int:
     prov.status("session_created", {"session_id": session.id})
 
     kickoff = _kickoff_message(args)
+    crashed = False
+    try:
+        # Stream-first: subscribe before sending so we don't miss early events.
+        with client.beta.sessions.events.stream(session.id) as stream:
+            client.beta.sessions.events.send(
+                session.id,
+                events=[{
+                    "type": "user.message",
+                    "content": [{"type": "text", "text": kickoff}],
+                }],
+            )
+            for event in stream:
+                et = event.type
 
-    # Stream-first: subscribe before sending so we don't miss early events.
-    with client.beta.sessions.events.stream(session.id) as stream:
-        client.beta.sessions.events.send(
-            session.id,
-            events=[{
-                "type": "user.message",
-                "content": [{"type": "text", "text": kickoff}],
-            }],
-        )
-        for event in stream:
-            et = event.type
+                if et == "agent.message":
+                    blocks = _content_to_block_list(getattr(event, "content", None))
+                    for b in blocks:
+                        if b.get("type") == "text":
+                            text = b.get("text", "")
+                            if text.strip():
+                                print(text)
+                                prov.agent_text(text)
 
-            if et == "agent.message":
-                blocks = _content_to_block_list(getattr(event, "content", None))
-                for b in blocks:
-                    if b.get("type") == "text":
-                        text = b.get("text", "")
-                        if text.strip():
-                            print(text)
-                            prov.agent_text(text)
+                elif et == "agent.tool_use":
+                    prov.tool_use("builtin", event.name, getattr(event, "input", None), event.id)
 
-            elif et == "agent.tool_use":
-                prov.tool_use("builtin", event.name, getattr(event, "input", None), event.id)
+                elif et == "agent.tool_result":
+                    content = _content_to_block_list(getattr(event, "content", None))
+                    tool_use_id = getattr(event, "tool_use_id", None)
+                    prov.tool_result(
+                        "builtin", None, content, tool_use_id,
+                        is_error=getattr(event, "is_error", False) or False,
+                    )
 
-            elif et == "agent.tool_result":
-                content = _content_to_block_list(getattr(event, "content", None))
-                tool_use_id = getattr(event, "tool_use_id", None)
-                prov.tool_result(
-                    "builtin", None, content, tool_use_id,
-                    is_error=getattr(event, "is_error", False) or False,
-                )
+                elif et == "agent.custom_tool_use":
+                    tool_input = getattr(event, "input", None) or {}
+                    prov.tool_use("custom", event.name, tool_input, event.id)
+                    result, is_error = dispatch_custom_tool(event.name, tool_input)
+                    prov.tool_result("custom", event.name, result, event.id, is_error=is_error)
+                    client.beta.sessions.events.send(
+                        session.id,
+                        events=[{
+                            "type": "user.custom_tool_result",
+                            "custom_tool_use_id": event.id,
+                            "content": [{"type": "text", "text": json.dumps(result, default=str)}],
+                            "is_error": is_error,
+                        }],
+                    )
 
-            elif et == "agent.custom_tool_use":
-                tool_input = getattr(event, "input", None) or {}
-                prov.tool_use("custom", event.name, tool_input, event.id)
-                result, is_error = dispatch_custom_tool(event.name, tool_input)
-                prov.tool_result("custom", event.name, result, event.id, is_error=is_error)
-                client.beta.sessions.events.send(
-                    session.id,
-                    events=[{
-                        "type": "user.custom_tool_result",
-                        "custom_tool_use_id": event.id,
-                        "content": [{"type": "text", "text": json.dumps(result, default=str)}],
-                        "is_error": is_error,
-                    }],
-                )
+                elif et == "session.error":
+                    err = getattr(event, "error", None)
+                    msg = getattr(err, "message", str(err)) if err else "(no detail)"
+                    prov.error(msg, detail=err)
 
-            elif et == "session.error":
-                err = getattr(event, "error", None)
-                msg = getattr(err, "message", str(err)) if err else "(no detail)"
-                prov.error(msg, detail=err)
+                elif et == "session.status_terminated":
+                    prov.status("terminated")
+                    print("\nSession terminated.")
+                    break
 
-            elif et == "session.status_terminated":
-                prov.status("terminated")
-                print("\nSession terminated.")
-                break
+                elif et == "session.status_idle":
+                    stop = getattr(event, "stop_reason", None)
+                    stop_type = getattr(stop, "type", None) if stop else None
+                    if stop_type == "requires_action":
+                        continue
+                    prov.status("idle", detail={"stop_reason": stop_type})
+                    print("\nAgent finished.")
+                    break
+    except KeyboardInterrupt:
+        print("\nInterrupted — saving partial provenance and exiting.", file=sys.stderr)
+        prov.error("KeyboardInterrupt during streaming")
+        crashed = True
+    except Exception as exc:
+        crashed = True
+        err_text = _tb.format_exc()
+        prov.error(f"streaming loop raised: {exc!r}", detail=err_text)
+        print(f"\n[ERROR] streaming loop crashed: {exc!r}", file=sys.stderr)
+        print(err_text, file=sys.stderr)
 
-            elif et == "session.status_idle":
-                stop = getattr(event, "stop_reason", None)
-                stop_type = getattr(stop, "type", None) if stop else None
-                if stop_type == "requires_action":
-                    continue
-                prov.status("idle", detail={"stop_reason": stop_type})
-                print("\nAgent finished.")
-                break
+    # Always try to settle, download whatever exists, and report cost.
+    try:
+        _wait_for_settle(client, session.id)
+        found = _download_csv(client, session.id)
+        if not found:
+            msg = "candidates.csv was not produced"
+            if crashed:
+                msg += " (sourcer crashed mid-stream — see traceback above)"
+            print(f"\nWARNING: {msg}. Session ID for debugging: {session.id}")
+        _print_cost(client, session.id, prov)
+    except Exception as exc:
+        prov.error(f"post-stream cleanup failed: {exc!r}", detail=_tb.format_exc())
+        print(f"\n[ERROR] cleanup failed: {exc!r}", file=sys.stderr)
+    finally:
+        prov.close()
+        print(f"\nFull tool-call audit trail: {PROVENANCE_PATH}")
 
-    _wait_for_settle(client, session.id)
-
-    found = _download_csv(client, session.id)
-    if not found:
-        print(
-            "\nWARNING: candidates.csv was not produced. "
-            f"Session ID for debugging: {session.id}"
-        )
-
-    _print_cost(client, session.id, prov)
-    prov.close()
-    print(f"\nFull tool-call audit trail: {PROVENANCE_PATH}")
-    return 0
+    return 1 if crashed else 0
 
 
 if __name__ == "__main__":

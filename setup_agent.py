@@ -191,7 +191,8 @@ def main() -> int:
     print(f"  SKILL_ID={skill_id}")
     print(f"  AGENT_ID={agent_id}")
     print()
-    print("Next: python sourcer.py \"<linkedin_job_url>\"")
+    print("Next: python sourcer.py --file role.txt")
+    print("  (or pass a non-LinkedIn job URL: careers page / Indeed / Glassdoor)")
     return 0
 
 

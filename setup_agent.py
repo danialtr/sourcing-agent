@@ -111,12 +111,17 @@ def _get_or_create_skill(client: anthropic.Anthropic) -> str:
     skill_bytes = SKILL_PATH.read_bytes()
     skill_id = os.getenv("SKILL_ID")
 
+    # The skills API expects each file's filename to include a top-level
+    # directory prefix. The API extracts that directory name as the skill's
+    # internal name and requires SKILL.md to live at its root.
+    skill_files = [("talent-sourcer/SKILL.md", skill_bytes, "text/markdown")]
+
     if skill_id:
         try:
             client.beta.skills.retrieve(skill_id)
             version = client.beta.skills.versions.create(
                 skill_id,
-                files=[("SKILL.md", skill_bytes, "text/markdown")],
+                files=skill_files,
             )
             print(f"  updated skill {skill_id} -> version {getattr(version, 'version', '?')}")
             return skill_id
@@ -125,7 +130,7 @@ def _get_or_create_skill(client: anthropic.Anthropic) -> str:
 
     skill = client.beta.skills.create(
         display_title="Talent Sourcer",
-        files=[("SKILL.md", skill_bytes, "text/markdown")],
+        files=skill_files,
     )
     set_key(str(ENV_PATH), "SKILL_ID", skill.id)
     print(f"  created skill: {skill.id}")

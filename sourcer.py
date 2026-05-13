@@ -1,8 +1,11 @@
 """Run one talent sourcing job against the Talent Sourcer agent.
 
 Usage:
-    python sourcer.py "<linkedin_job_url>"
     python sourcer.py --file role.txt
+    python sourcer.py "<public_job_url>"   # careers page, Indeed, Glassdoor
+
+LinkedIn URLs are accepted but the agent will skip the fetch and go straight
+to a web_search for a public mirror.
 
 Reads AGENT_ID / ENVIRONMENT_ID from .env (populated by setup_agent.py).
 Creates a session, streams agent events to stdout, handles host-side custom
@@ -224,8 +227,14 @@ def _content_to_block_list(content: Any) -> list[Any]:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Talent Sourcer")
-    parser.add_argument("url", nargs="?", help="LinkedIn job posting URL")
-    parser.add_argument("--file", help="Read JD text from a file instead of fetching a URL")
+    parser.add_argument(
+        "url", nargs="?",
+        help="Public job posting URL (careers page, Indeed, Glassdoor, etc.)",
+    )
+    parser.add_argument(
+        "--file",
+        help="Read JD text from a file instead of fetching a URL (UTF-8 preferred)",
+    )
     args = parser.parse_args()
     if not (args.url or args.file):
         parser.error("provide a URL positional argument or --file")
@@ -249,26 +258,32 @@ def _read_text_robust(path: pathlib.Path) -> str:
 
 
 def _kickoff_message(args: argparse.Namespace) -> str:
+    common_tail = (
+        "Sources: GitHub API (`github_search_users`) + Google web search of "
+        "stackoverflow.com, news.ycombinator.com, dev.to, personal sites, "
+        "conference pages. **Do NOT search LinkedIn** — it's blocked and "
+        "yields no useful data.\n\n"
+        "Always populate `source_query` and `source_url` so I can audit "
+        "where each candidate was found."
+    )
     if args.file:
         jd = _read_text_robust(pathlib.Path(args.file))
         return (
             "Source candidates for this job description. Write the result to "
-            "/mnt/session/outputs/candidates.csv per the talent-sourcer skill. "
-            "Always populate source_query and source_url so I can see where each "
-            "candidate was found.\n\n"
+            "/mnt/session/outputs/candidates.csv per the talent-sourcer skill.\n\n"
+            f"{common_tail}\n\n"
             f"--- JOB DESCRIPTION ---\n{jd}"
         )
     return (
-        "Source candidates for this LinkedIn job posting. Write the result to "
-        "/mnt/session/outputs/candidates.csv per the talent-sourcer skill. "
-        "Always populate source_query and source_url so I can see where each "
-        "candidate was found.\n\n"
+        "Source candidates for this job posting. Write the result to "
+        "/mnt/session/outputs/candidates.csv per the talent-sourcer skill.\n\n"
+        f"{common_tail}\n\n"
         f"URL: {args.url}\n\n"
-        "IMPORTANT: LinkedIn job URLs frequently return `url_not_allowed` from "
-        "web_fetch. Per the skill, attempt at most 2 web_fetch calls plus 1 "
-        "fallback web_search. If you still can't get the JD after that, STOP "
-        "and ask the user to re-run with `--file role.txt` — do NOT keep "
-        "retrying and do NOT write an empty CSV."
+        "If the URL is on linkedin.com, **do NOT try web_fetch** — go straight "
+        "to a web_search for a public mirror (Indeed, Glassdoor, careers "
+        "page). Per the skill, if after 2 web_fetch attempts plus 1 fallback "
+        "web_search you still don't have the JD, STOP and ask me to re-run "
+        "with `--file role.txt`."
     )
 
 

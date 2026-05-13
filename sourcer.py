@@ -234,9 +234,23 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
+def _read_text_robust(path: pathlib.Path) -> str:
+    """Read a text file without crashing on Windows-default cp1252.
+
+    Tries UTF-8 (with and without BOM) first, then cp1252, then latin-1
+    (which can decode any byte sequence — last-resort, may render odd).
+    """
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return path.read_bytes().decode("utf-8", errors="replace")
+
+
 def _kickoff_message(args: argparse.Namespace) -> str:
     if args.file:
-        jd = pathlib.Path(args.file).read_text()
+        jd = _read_text_robust(pathlib.Path(args.file))
         return (
             "Source candidates for this job description. Write the result to "
             "/mnt/session/outputs/candidates.csv per the talent-sourcer skill. "

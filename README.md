@@ -50,8 +50,8 @@ in the provenance audit trail.
 
 1. **Fetch the JD** — `web_fetch` the URL (skipped if it's a LinkedIn URL); fall back to `web_search` for a public mirror. Bails after 2 failed fetches plus 1 fallback search.
 2. **Parse the role** — title, seniority, must-have skills, location, remote policy, deal-breakers.
-3. **Source candidates one at a time.** For each candidate the agent finds and scores, it calls `add_candidate(...)` — a host-side custom tool that appends one CSV row, flushes to disk, dedupes on name + profile_url, and tells the agent how many more it needs. The agent stops as soon as the tool reports `complete: true`.
-4. **Done.** The orchestrator re-sorts the CSV by `match_score` descending and renumbers `rank` once the agent finishes.
+3. **Source candidates one at a time.** For each candidate the agent confirms fits the role, it calls `add_candidate(...)` — a host-side custom tool that appends one CSV row, flushes to disk, dedupes on name + profile_url, and tells the agent how many more it needs. The agent stops as soon as the tool reports `complete: true`. There is no scoring — rows appear in the order they're added.
+4. **Done.** No post-run sort; the CSV is whatever the agent confirmed in the order it confirmed it.
 
 Searches used:
    - `github_search_users` (custom tool, free GitHub REST API) — 1–2 queries for engineering roles
@@ -61,8 +61,8 @@ Searches used:
 ## CSV columns
 
 ```
-rank, match_score, name, current_title, current_company, location, email,
-profile_url, source, source_query, source_url, reason
+name, current_title, current_company, location, email, profile_url,
+source, source_query, source_url, reason
 ```
 
 - `profile_url` — primary public profile (GitHub, Stack Overflow, personal site, etc.)

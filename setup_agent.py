@@ -28,7 +28,11 @@ SYSTEM_PROMPT = (
     "You are a talent sourcing agent. When given a job posting URL or a job "
     "description, source candidates from public web sources and write each "
     "one immediately to candidates.csv using the `add_candidate` tool.\n\n"
-    "Follow the talent-sourcer skill for the sourcing process and scoring.\n\n"
+    "Follow the talent-sourcer skill for the sourcing process.\n\n"
+    "There is NO scoring. For each person you find who plausibly fits the "
+    "role (based on their public profile / team page / etc.), call "
+    "`add_candidate` once with a one-sentence reason explaining why. Do not "
+    "rate them, do not assign a number — just decide fit and move on.\n\n"
     "CRITICAL: After confirming a candidate fits the role, call `add_candidate` "
     "EXACTLY ONCE for that candidate before moving on. Do NOT batch — each "
     "call durably persists the candidate to disk so partial progress survives "
@@ -169,24 +173,20 @@ CUSTOM_TOOLS = [
         "type": "custom",
         "name": "add_candidate",
         "description": (
-            "Append ONE ranked candidate to candidates.csv. Call this exactly "
-            "once per candidate as soon as you confirm they fit the role — do "
-            "NOT batch. Each call is durably written to disk before returning, "
+            "Append ONE candidate to candidates.csv. Call this exactly once "
+            "per candidate as soon as you confirm they fit the role — do NOT "
+            "batch. Each call is durably written to disk before returning, "
             "so partial progress survives any crash. The response tells you "
             "the running count and remaining slots; stop calling this tool "
             "once `complete: true` is returned. Duplicates (same name + "
-            "profile_url) are silently skipped."
+            "profile_url) are silently skipped. There is no scoring — just "
+            "decide whether the candidate is a fit and write a one-sentence "
+            "reason."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Candidate's full name."},
-                "match_score": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 100,
-                    "description": "0-100 fit score against the must-haves.",
-                },
                 "current_title": {
                     "type": "string",
                     "description": "Current job title, or empty string if unknown.",
@@ -236,14 +236,15 @@ CUSTOM_TOOLS = [
                 "reason": {
                     "type": "string",
                     "description": (
-                        "One sentence explaining the score. Mention any "
-                        "deal-breakers (e.g. 'Strong skill match but located "
-                        "in São Paulo, may not relocate')."
+                        "One sentence on why this person fits the role. "
+                        "Mention deal-breakers if any (e.g. 'Strong Python "
+                        "background but located in São Paulo, may not "
+                        "relocate')."
                     ),
                 },
             },
             "required": [
-                "name", "match_score", "source", "source_query", "source_url", "reason",
+                "name", "source", "source_query", "source_url", "reason",
             ],
         },
     },

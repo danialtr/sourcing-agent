@@ -49,9 +49,8 @@ MAX_GITHUB_NETWORK = 2       # snowball calls hit many API requests; cap tight
 MAX_TEAM_PAGE_FETCHES = 5    # host-side, free, but bound it anyway
 
 CSV_HEADER = [
-    "rank", "match_score", "name", "current_title", "current_company",
-    "location", "email", "profile_url", "source", "source_query", "source_url",
-    "reason",
+    "name", "current_title", "current_company", "location", "email",
+    "profile_url", "source", "source_query", "source_url", "reason",
 ]
 
 # Sonnet 4.6 pricing per 1M tokens (cache write = 1.25x input, cache read = 0.1x input)
@@ -60,7 +59,7 @@ PRICE_OUT = 15.00
 
 
 # ---------------------------------------------------------------------------
-# Incremental CSV — write each candidate as it's added, dedupe, re-rank at end
+# Incremental CSV — append each candidate as it's confirmed, dedup, flush
 # ---------------------------------------------------------------------------
 
 class CandidatesCSV:
@@ -68,8 +67,8 @@ class CandidatesCSV:
 
     A header is written at construction time (overwriting any prior file).
     `append(candidate)` flushes immediately so a mid-run crash leaves a valid
-    partial CSV on disk. `finalize()` re-sorts by match_score and assigns the
-    final rank column.
+    partial CSV on disk. Rows are written in the order candidates are
+    confirmed — there is no scoring and no post-run sort.
     """
 
     def __init__(self, path: pathlib.Path, target: int) -> None:
@@ -109,14 +108,7 @@ class CandidatesCSV:
                 "message": "Already added (matched on name + profile_url). Continue with the next candidate.",
             }
 
-        try:
-            score = int(candidate.get("match_score") or 0)
-        except (TypeError, ValueError):
-            score = 0
-
         row = [
-            self.count + 1,  # provisional rank — fixed in finalize()
-            score,
             candidate.get("name", ""),
             candidate.get("current_title", ""),
             candidate.get("current_company", ""),
@@ -139,7 +131,6 @@ class CandidatesCSV:
             msg += " STOP — target reached, do not call add_candidate again."
         return {
             "added": True,
-            "rank": self.count,
             "count": self.count,
             "remaining": remaining,
             "complete": complete,
@@ -147,27 +138,9 @@ class CandidatesCSV:
         }
 
     def finalize(self) -> None:
-        """Re-sort by match_score desc, fix the rank column."""
-        if self.count == 0:
-            return
-        with self.path.open(encoding="utf-8") as f:
-            reader = csv.reader(f)
-            header = next(reader)
-            rows = list(reader)
-
-        def score_of(r: list[str]) -> int:
-            try:
-                return int(r[1])
-            except (ValueError, IndexError):
-                return 0
-
-        rows.sort(key=score_of, reverse=True)
-        for i, row in enumerate(rows, 1):
-            row[0] = str(i)
-        with self.path.open("w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(header)
-            w.writerows(rows)
+        """No-op kept for symmetry; rows are written in the order candidates
+        are confirmed, with no post-run sorting since we no longer score."""
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -491,11 +464,10 @@ def _summarize_input(tool_input: Any) -> str:
     if not isinstance(tool_input, dict):
         return _preview(tool_input, 120)
     # add_candidate gets a special-cased short summary
-    if "name" in tool_input and "match_score" in tool_input:
+    if "name" in tool_input and ("source" in tool_input or "source_url" in tool_input):
         name = tool_input.get("name", "?")
-        score = tool_input.get("match_score", "?")
         src = tool_input.get("source", "?")
-        return f'name="{name}" score={score} source={src}'
+        return f'name="{name}" source={src}'
     for key in ("query", "url", "command", "path", "file_path"):
         if key in tool_input:
             return f'{key}="{_preview(tool_input[key], 120)}"'
@@ -546,7 +518,7 @@ def _summarize_result(content: Any, tool_name: str | None = None) -> str:
         if content.get("text_chars") is not None and content.get("url"):
             return f"team page {content['url']} ({content['text_chars']:,} chars)"
         if content.get("added"):
-            return f"added rank={content.get('rank')} count={content.get('count')}/{TARGET_COUNT}"
+            return f"added count={content.get('count')}/{TARGET_COUNT}"
         if content.get("duplicate"):
             return f"duplicate (count={content.get('count')}/{TARGET_COUNT})"
         if content.get("complete"):

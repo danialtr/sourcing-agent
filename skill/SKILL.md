@@ -14,7 +14,7 @@ Source **exactly 10 candidates** for the job. Call `add_candidate` once per cand
 - `fetch_company_team_page` (custom) — given a company name + homepage URL, tries common team-page paths (`/team`, `/about`, `/people`, etc.) and returns the page text. **Highest-leverage tool for non-engineering roles** at specific companies — one call often yields 5–20 candidates.
 - `github_search_users` (custom) — direct GitHub REST API. **First-line tool for engineering roles.**
 - `github_user_network` (custom) — given a GitHub username, returns their 1-hop follow graph (20 peer candidates by default). Snowball after `github_search_users` finds a strong seed.
-- `add_candidate` (custom) — **append one ranked candidate to candidates.csv.** Call EXACTLY ONCE per candidate as soon as you confirm they fit. Do NOT batch. Each call is persisted before returning. Watch the response's `complete` field; when `true`, STOP.
+- `add_candidate` (custom) — **append one candidate to candidates.csv.** Call EXACTLY ONCE per candidate as soon as you confirm they fit the role. Do NOT batch. Each call is persisted before returning. Watch the response's `complete` field; when `true`, STOP. **There is no scoring** — just decide whether they fit and write a one-sentence reason.
 - `web_search` — Google. Use for finding companies, personal sites, Stack Overflow, HackerNews, dev.to, conference speakers, portfolios. **Start broad** (2-4 words, no `site:` filters).
 - `web_fetch` — pull full page contents from a known URL.
 - `write`, `read`, `bash`, `edit`, `glob`, `grep` — container filesystem. **Do NOT use `write` for candidates.csv** — that's the orchestrator's job via `add_candidate`.
@@ -50,7 +50,7 @@ Source **exactly 10 candidates** for the job. Call `add_candidate` once per cand
    1. Run **1 broad `github_search_users` query** mixing 1 language + 1 location filter. Example: `language:python location:"San Francisco" followers:>50`.
    2. Identify the **1-2 strongest seeds** in the result (rich profile, good repos, matches the role).
    3. Call `github_user_network` on each seed. Returns ~20 peers — often very high signal.
-   4. Score every promising user and `add_candidate` them.
+   4. For every user that looks like a fit, call `add_candidate` directly.
    5. If still under target, run **one more** `github_search_users` query varying the skill (e.g. `language:rust` if the role wants both).
 
    ### Pattern B — Team-page first (non-engineering at specific companies)
@@ -65,7 +65,7 @@ Source **exactly 10 candidates** for the job. Call `add_candidate` once per cand
       The result is a list of companies. Extract 3–5 names.
    2. **For each company, find its homepage URL.** Either it's already in the search result, or a quick `web_search` like `Sereact official site` gets it.
    3. **Call `fetch_company_team_page(company_name, homepage_url)`** for each. Returns the team page text with 5–20 names and titles.
-   4. **Extract candidates** from the page text. For each strong match, score and `add_candidate` directly (the team page itself is a verified public source).
+   4. **Extract candidates** from the page text. For each plausible match, call `add_candidate` directly (the team page itself is a verified public source).
    5. If the page is JS-heavy and `fetch_company_team_page` fails or returns thin text, use `web_fetch` on the same URL as a fallback (Anthropic's fetcher handles JavaScript).
 
    ### Pattern C — Portfolio-first (design, marketing, writers)
@@ -76,7 +76,7 @@ Source **exactly 10 candidates** for the job. Call `add_candidate` once per cand
       - `site:medium.com "<role>" <city>` for writers/PMs
       - `site:substack.com "<role>"`
    2. Open promising profiles via `web_fetch`. Each portfolio usually has the person's name, location, and recent work.
-   3. Score and `add_candidate`.
+   3. For each fit, call `add_candidate`.
 
    ### Query construction rules (when you use `web_search`)
 
@@ -114,19 +114,20 @@ Source **exactly 10 candidates** for the job. Call `add_candidate` once per cand
 
    Dedupe by GitHub login or by normalized name + company.
 
-4. **Done.** After `add_candidate` returns `complete: true`, output one brief summary message listing the 10 names and stop. The orchestrator handles final sorting and ranking — do not call `write` on candidates.csv.
+4. **Done.** After `add_candidate` returns `complete: true`, output one brief summary message listing the names and stop. Do not call `write` on candidates.csv.
 
 ## Field guidance for `add_candidate`
 
+There is no scoring. The CSV has no `rank` or `match_score` column — rows appear in the order you confirm them.
+
 - `name` — full name (required)
-- `match_score` — 0–100 against must-haves (required)
 - `current_title`, `current_company`, `location` — empty string if not publicly stated
 - `email` — empty string unless publicly listed on GitHub or candidate's own resume; **never guess**
 - `profile_url` — GitHub, Stack Overflow, personal site, etc. — whichever is the candidate's primary public presence
 - `source` — `github`, `stackoverflow`, `hackernews`, `devto`, or `web`
 - `source_query` — the EXACT search query or tool input that surfaced this candidate
 - `source_url` — the URL of the page where you extracted the data
-- `reason` — one sentence on why they match; flag any deal-breakers here
+- `reason` — one sentence on why they fit the role; flag any deal-breakers here (e.g. "Strong Python background but located in São Paulo, may not relocate")
 
 ## Rules
 

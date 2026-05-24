@@ -1,0 +1,42 @@
+job_id: "leipzig-icu-001"
+employer:
+  name: "Universitätsklinikum Leipzig"
+  type: "university hospital"
+  location_city: "Leipzig"
+  location_state: "Sachsen"
+  country: "Germany"
+role:
+  german_title: "Pflegefachkraft Intensivstation"
+  english_title: "Registered Nurse - Intensive Care Unit"
+  specialty: "ICU"
+  specialty_aliases: ["intensive care", "critical care", "ITS", "Intensivmedizin"]
+  trainee_or_qualified: "qualified"
+  positions_open: 5
+requirements:
+  min_years_experience: 2
+  nursing_qualification: "3-year nursing diploma OR Bachelor of Science in Nursing (BSN)"
+  german_level_at_application: "B1"
+  german_level_required_within_12_months: "B2"
+  english_level: "conversational"
+  visa_pathway: "§16d AufenthG (Anerkennungspartnerschaft)"
+  open_to_partial_recognition: true
+target_source:
+  country: "Philippines"
+  country_aliases: ["Philippines", "Filipino", "Pinoy", "Pinay", "PH"]
+  preferred_regions: ["Metro Manila", "Cebu", "Davao", "Iloilo"]
+  exclude_who_red_list: true
+employer_offers:
+  contract: "Permanent after Anerkennung (~12 months)"
+  starting_salary_eur_month_gross: 2800
+  full_salary_eur_month_gross: 3300
+  language_course_funded: true
+  housing_assistance_months: 6
+  flight_reimbursement: true
+  family_reunification_supported: true
+urgency:
+  start_date: "2026-08-01"
+  shortlist_target_date: "2026-07-01"
+search_settings:
+  target_total_searches: 500
+  brave_search_budget: 100
+  min_score_for_csv: 50

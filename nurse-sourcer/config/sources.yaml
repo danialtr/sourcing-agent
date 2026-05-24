@@ -1,0 +1,41 @@
+# Per-source toggles and limits. Set `enabled: false` to skip a source.
+sources:
+  brave_search:
+    enabled: true
+    max_queries: 100
+    rate_limit_seconds: 1.1
+  duckduckgo:
+    enabled: true
+    max_queries: 150
+    rate_limit_seconds: 2.5
+  reddit:
+    enabled: true
+    subreddits: ["Philippines", "phinvest", "AskGermany", "germany", "IWantOut", "nursing", "Pflege"]
+    posts_per_search: 50
+    time_filter: "year"
+  youtube:
+    enabled: true
+    video_search_queries: ["Filipino nurse Germany vlog", "Pinoy nurse Deutschland", "Triple Win nurse Germany", "Filipino nurse Anerkennung"]
+    videos_per_query: 25
+    comments_per_video: 100
+  facebook_public:
+    enabled: true
+    pages: ["PinoyNursesGermany", "FilipinoNursesinDE", "fnag.org"]
+    posts_per_page: 10
+    delay_seconds: 10
+  tiktok_hashtag:
+    enabled: true
+    hashtags: ["filipinonurseingermany", "nursetogermany", "pinoynurse", "pflegefachkraft", "b2deutsch", "triplewin"]
+    videos_per_hashtag: 30
+  jobstreet_ph:
+    enabled: true
+    keywords: ["nurse germany", "registered nurse abroad", "RN Germany"]
+    pages_per_keyword: 3
+  kalibrr:
+    enabled: true
+    keywords: ["nurse germany", "RN abroad"]
+    pages_per_keyword: 3
+  goethe_manila:
+    enabled: true
+  google_cse:
+    enabled: false
